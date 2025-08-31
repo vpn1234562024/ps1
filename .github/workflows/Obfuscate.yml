@@ -37,7 +37,7 @@ jobs:
           echo -e "\033[34m[获取最新 Release]\033[0m"
           API_URL="https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases"
           RESPONSE=$(curl -s "$API_URL")
-          LATEST_RELEASE=$(echo "$RESPONSE" | jq -r '.[0]')
+          LATEST_RELEASE=$(echo "$RESPONSE" | jq -r '[.[] | select(.prerelease == false and .draft == false)][0]')
           TAG_NAME=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
           DOWNLOAD_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name == "worker.zip") | .browser_download_url')
 
