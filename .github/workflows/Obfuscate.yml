@@ -66,7 +66,7 @@ jobs:
         if: env.UPDATE_NEEDED == 'true'
         run: |
           echo -e "\033[34m[清理旧文件]\033[0m"
-          rm -rf ./*
+          rm -f _worker.js version.txt
           echo -e "\033[34m[下载最新 worker.zip]\033[0m"
           wget -O worker.zip "$DOWNLOAD_URL"
           echo -e "\033[34m[解压 worker.zip]\033[0m"
