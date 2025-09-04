@@ -61,7 +61,7 @@ jobs:
             echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
           fi
 
-      # === 如果需要更新，开始按 tag 拉源码并构建（不再下载官方 release 的成品） ===
+      # === 拉源码按 tag 构建 ===
       - name: 拉取官方源码并检出标签
         if: env.UPDATE_NEEDED == 'true'
         shell: bash
@@ -81,7 +81,7 @@ jobs:
         with:
           node-version: "20.x"
 
-      - name: 安装 upstream 依赖（生产模式）
+      - name: 安装依赖（生产模式）
         if: env.UPDATE_NEEDED == 'true'
         working-directory: upstream
         shell: bash
@@ -89,16 +89,15 @@ jobs:
           set -e
           npm ci --production
 
-      - name: 生成随机种子（写入 GITHUB_ENV）
+      - name: 生成随机种子
         if: env.UPDATE_NEEDED == 'true'
         shell: bash
         run: |
-          set -e
           SEED=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
           echo "OBFUSCATE_SEED=$SEED" >> $GITHUB_ENV
           echo "生成随机种子: $SEED"
 
-      - name: 补丁：在 obfuscator 配置中注入 OBFUSCATE_SEED（非破坏式）
+      - name: 注入 OBFUSCATE_SEED 支持到 build.js
         if: env.UPDATE_NEEDED == 'true'
         working-directory: upstream
         shell: bash
@@ -124,10 +123,10 @@ jobs:
               }
             ' "$FILE"
           else
-            echo "未找到 $FILE，跳过注入（后续会二次混淆兜底）。"
+            echo "未找到 $FILE，跳过注入。"
           fi
 
-      - name: 构建 upstream（传入 seed，强制走 obfuscator 分支）
+      - name: 构建 upstream
         if: env.UPDATE_NEEDED == 'true'
         working-directory: upstream
         env:
@@ -139,26 +138,13 @@ jobs:
           echo -e "\n=== npm run build (NODE_ENV=$NODE_ENV) ==="
           npm run build
 
-      - name: 列出 upstream/dist（调试信息）
-        if: env.UPDATE_NEEDED == 'true'
-        working-directory: upstream
-        shell: bash
-        run: |
-          echo -e "\n=== upstream 根目录 ==="
-          ls -la || true
-          echo -e "\n=== upstream/dist ==="
-          ls -la dist || true
-          echo -e "\n=== 查找可能的产物文件 ==="
-          find . -maxdepth 4 -type f \( -iname "worker.js" -o -iname "_worker.js" -o -iname "worker.zip" \) -exec ls -lh {} \; || true
-
-      - name: 定位构建产物（返回 outputs）
+      - name: 定位构建产物
         if: env.UPDATE_NEEDED == 'true'
         id: locate_worker
         working-directory: upstream
         shell: bash
         run: |
           set -e
-          # 优先判断 dist/worker.js
           if [ -f "dist/worker.js" ]; then
             echo "worker_path=dist/worker.js" >> $GITHUB_OUTPUT
             echo "worker_found=true" >> $GITHUB_OUTPUT
@@ -166,11 +152,6 @@ jobs:
           fi
           if [ -f "dist/_worker.js" ]; then
             echo "worker_path=dist/_worker.js" >> $GITHUB_OUTPUT
-            echo "worker_found=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          if [ -f "_worker.js" ]; then
-            echo "worker_path=_worker.js" >> $GITHUB_OUTPUT
             echo "worker_found=true" >> $GITHUB_OUTPUT
             exit 0
           fi
@@ -184,7 +165,7 @@ jobs:
           fi
           echo "worker_found=false" >> $GITHUB_OUTPUT
 
-      - name: 后备二次混淆（仅当未在 build.js 注入 seed 时，并且找到了产物）
+      - name: 后备二次混淆
         if: env.UPDATE_NEEDED == 'true' && steps.locate_worker.outputs.worker_found == 'true'
         working-directory: upstream
         shell: bash
@@ -192,19 +173,17 @@ jobs:
           OBFUSCATE_SEED: ${{ env.OBFUSCATE_SEED }}
           WORKER_PATH: ${{ steps.locate_worker.outputs.worker_path }}
         run: |
-          set -e
-          echo "WORKER_PATH=${WORKER_PATH}"
-          # 如果 build.js 已经注入了 OBFUSCATE_SEED，就跳过二次混淆
-          if grep -q "OBFUSCATE_SEED" scripts/build.js 2>/dev/null; then
-            echo "构建脚本已注入 OBFUSCATE_SEED，跳过二次混淆。"
-            exit 0
-          fi
-          if [ -z "$WORKER_PATH" ]; then
-            echo "WORKER_PATH 为空，无法二次混淆"
-            exit 1
-          fi
+set -e
+echo "WORKER_PATH=${WORKER_PATH}"
+if grep -q "OBFUSCATE_SEED" scripts/build.js 2>/dev/null; then
+  echo "构建脚本已注入 OBFUSCATE_SEED，跳过二次混淆。"
+  exit 0
+fi
+if [ -z "$WORKER_PATH" ]; then
+  echo "WORKER_PATH 为空，无法二次混淆"
+  exit 1
+fi
 
-          # 进行二次混淆：这里在 upstream 工作目录下执行，确保 require 能找到 node_modules
 node - <<'NODE'
 const fs = require('fs');
 const Ob = require('javascript-obfuscator');
@@ -240,13 +219,6 @@ NODE
           fi
           echo "${TAG_NAME}" > version.txt
           echo "已拷贝 _worker.js 并写入 version.txt"
-
-      - name: 报错（若未找到产物）
-        if: env.UPDATE_NEEDED == 'true' && steps.locate_worker.outputs.worker_found == 'false'
-        shell: bash
-        run: |
-          echo -e "\033[31m错误：未找到构建产物（dist/worker.js 或 _worker.js）。请查看上面的构建日志以定位问题。\033[0m"
-          exit 1
 
       - name: 提交更改
         if: env.UPDATE_NEEDED == 'true'
