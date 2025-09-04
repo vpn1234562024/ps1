@@ -72,24 +72,16 @@ jobs:
           echo -e "\033[34m[构建项目]\033[0m"
           npm run build
 
-          echo "目录信息开始"
-
-          ls -la
-
-          ls -la dist
-
-          echo "目录信息结束"
-
-          echo -e "\033[34m[查找生成的 _worker.js]\033[0m"
-          find . -type f -name "_worker.js" || echo "未找到 _worker.js"
-          if [ -f "dist/_worker.js" ]; then
-            echo "找到 dist/_worker.js，复制到主仓库"
-            cp dist/_worker.js ../_worker.js
-          elif [ -f "_worker.js" ]; then
-            echo "找到根目录下的 _worker.js，复制到主仓库"
-            cp _worker.js ../_worker.js
+          echo -e "\033[34m[查找生成的 worker.js]\033[0m"
+          find . -type f -name "worker.js" || echo "未找到 worker.js"
+          if [ -f "dist/worker.js" ]; then
+            echo "找到 dist/worker.js，复制并重命名为 _worker.js 到主仓库"
+            cp dist/worker.js ../_worker.js
+          elif [ -f "worker.js" ]; then
+            echo "找到根目录下的 worker.js，复制并重命名为 _worker.js 到主仓库"
+            cp worker.js ../_worker.js
           else
-            echo -e "\033[31m未找到 _worker.js，构建失败！\033[0m"
+            echo -e "\033[31m未找到 worker.js，构建失败！\033[0m"
             exit 1
           fi
 
