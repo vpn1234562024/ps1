@@ -64,7 +64,7 @@ jobs:
 
           echo -e "\033[34m[设置 Node.js]\033[0m"
           curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-          sudo apt-get install -y nodejs
+          sudo apt-get install -y nodejs uuid-runtime
 
           echo -e "\033[34m[安装依赖]\033[0m"
           npm install --production
@@ -72,16 +72,19 @@ jobs:
           echo -e "\033[34m[构建项目]\033[0m"
           npm run build
 
-          echo -e "\033[34m[查找生成的 worker.js]\033[0m"
-          find . -type f -name "worker.js" || echo "未找到 worker.js"
+          echo -e "\033[34m[优化生成的 worker.js 以避免相似性]\033[0m"
           if [ -f "dist/worker.js" ]; then
-            echo "找到 dist/worker.js，复制并重命名为 _worker.js 到主仓库"
-            cp dist/worker.js ../_worker.js
-          elif [ -f "worker.js" ]; then
-            echo "找到根目录下的 worker.js，复制并重命名为 _worker.js 到主仓库"
-            cp worker.js ../_worker.js
+            # 移除前两行注释
+            sed -i '1,2d' dist/worker.js
+            # 生成随机 seed
+            RANDOM_SEED=$(uuidgen)
+            echo "使用随机 seed: $RANDOM_SEED"
+            # 重新混淆以改变变量名和结构
+            npx javascript-obfuscator dist/worker.js --output dist/obfuscated_worker.js --seed "$RANDOM_SEED" --compact true --self-defending false --string-array true --string-array-encoding 'rc4' --string-array-threshold 0.75 --transform-object-keys true --unicode-escape-sequence false
+            # 复制优化后的文件
+            cp dist/obfuscated_worker.js ../_worker.js
           else
-            echo -e "\033[31m未找到 worker.js，构建失败！\033[0m"
+            echo -e "\033[31m未找到 dist/worker.js，构建失败！\033[0m"
             exit 1
           fi
 
