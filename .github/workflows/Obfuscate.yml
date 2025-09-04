@@ -61,7 +61,6 @@ jobs:
             echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
           fi
 
-      # === 拉源码按 tag 构建 ===
       - name: 拉取官方源码并检出标签
         if: env.UPDATE_NEEDED == 'true'
         shell: bash
@@ -81,7 +80,7 @@ jobs:
         with:
           node-version: "20.x"
 
-      - name: 安装依赖（生产模式）
+      - name: 安装 upstream 依赖（生产模式）
         if: env.UPDATE_NEEDED == 'true'
         working-directory: upstream
         shell: bash
@@ -89,15 +88,16 @@ jobs:
           set -e
           npm ci --production
 
-      - name: 生成随机种子
+      - name: 生成随机种子（写入 GITHUB_ENV）
         if: env.UPDATE_NEEDED == 'true'
         shell: bash
         run: |
+          set -e
           SEED=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
           echo "OBFUSCATE_SEED=$SEED" >> $GITHUB_ENV
           echo "生成随机种子: $SEED"
 
-      - name: 注入 OBFUSCATE_SEED 支持到 build.js
+      - name: 注入 OBFUSCATE_SEED 支持
         if: env.UPDATE_NEEDED == 'true'
         working-directory: upstream
         shell: bash
@@ -106,27 +106,25 @@ jobs:
           FILE="scripts/build.js"
           if [ -f "$FILE" ]; then
             node -e '
-              const fs = require("fs");
-              const p = process.argv[1];
-              let s = fs.readFileSync(p,"utf8");
-              if (!/OBFUSCATE_SEED/.test(s)) {
-                const needle = "obfs.obfuscate(minifiedCode.code, {";
-                if (s.indexOf(needle) !== -1) {
-                  s = s.replace(needle, needle + "\n            seed: Number(process.env.OBFUSCATE_SEED) || undefined,");
-                  fs.writeFileSync(p, s);
-                  console.log("已在 build.js 中注入 OBFUSCATE_SEED 支持。");
-                } else {
-                  console.log("未找到 obfs.obfuscate 调用点，跳过注入（后续会二次混淆兜底）。");
-                }
-              } else {
-                console.log("build.js 已包含 OBFUSCATE_SEED，跳过注入。");
-              }
-            ' "$FILE"
-          else
-            echo "未找到 $FILE，跳过注入。"
+const fs = require("fs");
+const p = process.argv[1];
+let s = fs.readFileSync(p,"utf8");
+if (!/OBFUSCATE_SEED/.test(s)) {
+  const needle = "obfs.obfuscate(minifiedCode.code, {";
+  if (s.indexOf(needle) !== -1) {
+    s = s.replace(needle, needle + "\n            seed: Number(process.env.OBFUSCATE_SEED) || undefined,");
+    fs.writeFileSync(p, s);
+    console.log("已在 build.js 中注入 OBFUSCATE_SEED 支持。");
+  } else {
+    console.log("未找到 obfs.obfuscate 调用点，跳过注入。");
+  }
+} else {
+  console.log("build.js 已包含 OBFUSCATE_SEED，跳过注入。");
+}
+' "$FILE"
           fi
 
-      - name: 构建 upstream
+      - name: 构建 upstream（传入 seed，强制走 obfuscator 分支）
         if: env.UPDATE_NEEDED == 'true'
         working-directory: upstream
         env:
@@ -155,6 +153,11 @@ jobs:
             echo "worker_found=true" >> $GITHUB_OUTPUT
             exit 0
           fi
+          if [ -f "_worker.js" ]; then
+            echo "worker_path=_worker.js" >> $GITHUB_OUTPUT
+            echo "worker_found=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           if [ -f "dist/worker.zip" ]; then
             unzip -o dist/worker.zip _worker.js -d /tmp || true
             if [ -f "/tmp/_worker.js" ]; then
@@ -173,16 +176,16 @@ jobs:
           OBFUSCATE_SEED: ${{ env.OBFUSCATE_SEED }}
           WORKER_PATH: ${{ steps.locate_worker.outputs.worker_path }}
         run: |
-set -e
-echo "WORKER_PATH=${WORKER_PATH}"
-if grep -q "OBFUSCATE_SEED" scripts/build.js 2>/dev/null; then
-  echo "构建脚本已注入 OBFUSCATE_SEED，跳过二次混淆。"
-  exit 0
-fi
-if [ -z "$WORKER_PATH" ]; then
-  echo "WORKER_PATH 为空，无法二次混淆"
-  exit 1
-fi
+          set -e
+          if grep -q "OBFUSCATE_SEED" scripts/build.js 2>/dev/null; then
+            echo "构建脚本已注入 OBFUSCATE_SEED，跳过二次混淆。"
+            exit 0
+          fi
+          if [ -z "$WORKER_PATH" ]; then
+            echo "WORKER_PATH 为空，无法二次混淆"
+            exit 1
+          fi
+          echo "WORKER_PATH=${WORKER_PATH}"
 
 node - <<'NODE'
 const fs = require('fs');
@@ -192,14 +195,14 @@ const seed = Number(process.env.OBFUSCATE_SEED) || 0;
 console.log('二次混淆 target path:', path, 'seed:', seed);
 const code = fs.readFileSync(path, 'utf8');
 const result = Ob.obfuscate(code, {
-  seed,
-  target: "browser",
-  compact: true,
-  controlFlowFlattening: false,
-  deadCodeInjection: true,
-  deadCodeInjectionThreshold: 0.2,
-  stringArrayThreshold: 1,
-  stringArrayEncoding: ["rc4"]
+seed,
+target: "browser",
+compact: true,
+controlFlowFlattening: false,
+deadCodeInjection: true,
+deadCodeInjectionThreshold: 0.2,
+stringArrayThreshold: 1,
+stringArrayEncoding: ["rc4"]
 });
 fs.writeFileSync(path, result.getObfuscatedCode(), 'utf8');
 console.log('二次混淆完成:', path);
@@ -221,7 +224,7 @@ NODE
           echo "已拷贝 _worker.js 并写入 version.txt"
 
       - name: 提交更改
-        if: env.UPDATE_NEEDED == 'true'
+        if: env.UPDATE_NEEDED == 'true' && steps.locate_worker.outputs.worker_found == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "🔄 自动构建并同步最新 Worker 版本：${{ env.TAG_NAME }}（随机种子构建）"
