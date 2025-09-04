@@ -5,8 +5,8 @@ on:
     branches:
       - main
   schedule:
-    - cron: "0 17 * * *"
-  workflow_dispatch:
+    - cron: "0 17 * * *" # 每天凌晨1点自动运行
+  workflow_dispatch:     # 支持手动运行
 
 permissions:
   contents: write
@@ -20,7 +20,6 @@ jobs:
 
       - name: 获取当前本地版本
         id: get_local_version
-        shell: bash
         run: |
           echo -e "\033[34m[获取本地版本]\033[0m"
           if [ -f version.txt ]; then
@@ -32,25 +31,20 @@ jobs:
           fi
           echo "LOCAL_VERSION=$LOCAL_VERSION" >> $GITHUB_ENV
 
-      - name: 获取最新 Release Tag（只取正式 release 的 tag）
+      - name: 获取最新 Release 信息
         id: get_release
-        shell: bash
         run: |
           echo -e "\033[34m[获取最新 Release]\033[0m"
           API_URL="https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases"
           RESPONSE=$(curl -s "$API_URL")
           LATEST_RELEASE=$(echo "$RESPONSE" | jq -r '[.[] | select(.prerelease == false and .draft == false)][0]')
           TAG_NAME=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
-          if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "null" ]; then
-            echo -e "\033[31m未找到最新正式版 Release，退出！\033[0m"
-            exit 1
-          fi
+
           echo "最新版本号: $TAG_NAME"
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
 
       - name: 判断是否需要更新
         id: check_update
-        shell: bash
         run: |
           echo -e "\033[34m[判断是否需要更新]\033[0m"
           if [ "$LOCAL_VERSION" = "$TAG_NAME" ]; then
@@ -61,172 +55,34 @@ jobs:
             echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
           fi
 
-      - name: 拉取官方源码并检出标签
+      - name: 如果需要，检出官方仓库代码并自行构建
         if: env.UPDATE_NEEDED == 'true'
-        shell: bash
         run: |
-          set -e
-          rm -rf upstream
-          git clone https://github.com/bia-pain-bache/BPB-Worker-Panel.git upstream
-          cd upstream
-          git fetch --tags --force
-          git checkout -q "$TAG_NAME" || git checkout -q "tags/$TAG_NAME" || true
-          echo "当前 HEAD: $(git rev-parse --short HEAD || echo unknown)"
-          cd ..
+          echo -e "\033[34m[检出官方仓库最新标签代码]\033[0m"
+          git clone --depth 1 --branch ${{ env.TAG_NAME }} https://github.com/bia-pain-bache/BPB-Worker-Panel.git official-repo
+          cd official-repo
 
-      - name: Set up Node.js
-        if: env.UPDATE_NEEDED == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20.x"
+          echo -e "\033[34m[设置 Node.js]\033[0m"
+          curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+          sudo apt-get install -y nodejs
 
-      - name: 安装 upstream 依赖（生产模式）
-        if: env.UPDATE_NEEDED == 'true'
-        working-directory: upstream
-        shell: bash
-        run: |
-          set -e
-          npm ci --production
+          echo -e "\033[34m[安装依赖]\033[0m"
+          npm install --production
 
-      - name: 生成随机种子（写入 GITHUB_ENV）
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
-        run: |
-          set -e
-          SEED=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
-          echo "OBFUSCATE_SEED=$SEED" >> $GITHUB_ENV
-          echo "生成随机种子: $SEED"
-
-      - name: 注入 OBFUSCATE_SEED 支持
-        if: env.UPDATE_NEEDED == 'true'
-        working-directory: upstream
-        shell: bash
-        run: |
-          set -e
-          FILE="scripts/build.js"
-          if [ -f "$FILE" ]; then
-            node -e '
-const fs = require("fs");
-const p = process.argv[1];
-let s = fs.readFileSync(p,"utf8");
-if (!/OBFUSCATE_SEED/.test(s)) {
-  const needle = "obfs.obfuscate(minifiedCode.code, {";
-  if (s.indexOf(needle) !== -1) {
-    s = s.replace(needle, needle + "\n            seed: Number(process.env.OBFUSCATE_SEED) || undefined,");
-    fs.writeFileSync(p, s);
-    console.log("已在 build.js 中注入 OBFUSCATE_SEED 支持。");
-  } else {
-    console.log("未找到 obfs.obfuscate 调用点，跳过注入。");
-  }
-} else {
-  console.log("build.js 已包含 OBFUSCATE_SEED，跳过注入。");
-}
-' "$FILE"
-          fi
-
-      - name: 构建 upstream（传入 seed，强制走 obfuscator 分支）
-        if: env.UPDATE_NEEDED == 'true'
-        working-directory: upstream
-        env:
-          NODE_ENV: production
-          OBFUSCATE_SEED: ${{ env.OBFUSCATE_SEED }}
-        shell: bash
-        run: |
-          set -e
-          echo -e "\n=== npm run build (NODE_ENV=$NODE_ENV) ==="
+          echo -e "\033[34m[构建项目]\033[0m"
           npm run build
 
-      - name: 定位构建产物
-        if: env.UPDATE_NEEDED == 'true'
-        id: locate_worker
-        working-directory: upstream
-        shell: bash
-        run: |
-          set -e
-          if [ -f "dist/worker.js" ]; then
-            echo "worker_path=dist/worker.js" >> $GITHUB_OUTPUT
-            echo "worker_found=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          if [ -f "dist/_worker.js" ]; then
-            echo "worker_path=dist/_worker.js" >> $GITHUB_OUTPUT
-            echo "worker_found=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          if [ -f "_worker.js" ]; then
-            echo "worker_path=_worker.js" >> $GITHUB_OUTPUT
-            echo "worker_found=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          if [ -f "dist/worker.zip" ]; then
-            unzip -o dist/worker.zip _worker.js -d /tmp || true
-            if [ -f "/tmp/_worker.js" ]; then
-              echo "worker_path=/tmp/_worker.js" >> $GITHUB_OUTPUT
-              echo "worker_found=true" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          fi
-          echo "worker_found=false" >> $GITHUB_OUTPUT
-
-      - name: 后备二次混淆
-        if: env.UPDATE_NEEDED == 'true' && steps.locate_worker.outputs.worker_found == 'true'
-        working-directory: upstream
-        shell: bash
-        env:
-          OBFUSCATE_SEED: ${{ env.OBFUSCATE_SEED }}
-          WORKER_PATH: ${{ steps.locate_worker.outputs.worker_path }}
-        run: |
-          set -e
-          if grep -q "OBFUSCATE_SEED" scripts/build.js 2>/dev/null; then
-            echo "构建脚本已注入 OBFUSCATE_SEED，跳过二次混淆。"
-            exit 0
-          fi
-          if [ -z "$WORKER_PATH" ]; then
-            echo "WORKER_PATH 为空，无法二次混淆"
-            exit 1
-          fi
-          echo "WORKER_PATH=${WORKER_PATH}"
-
-node - <<'NODE'
-const fs = require('fs');
-const Ob = require('javascript-obfuscator');
-const path = process.env.WORKER_PATH;
-const seed = Number(process.env.OBFUSCATE_SEED) || 0;
-console.log('二次混淆 target path:', path, 'seed:', seed);
-const code = fs.readFileSync(path, 'utf8');
-const result = Ob.obfuscate(code, {
-seed,
-target: "browser",
-compact: true,
-controlFlowFlattening: false,
-deadCodeInjection: true,
-deadCodeInjectionThreshold: 0.2,
-stringArrayThreshold: 1,
-stringArrayEncoding: ["rc4"]
-});
-fs.writeFileSync(path, result.getObfuscatedCode(), 'utf8');
-console.log('二次混淆完成:', path);
-NODE
-
-      - name: 拷贝产物到仓库根并记录新版本
-        if: env.UPDATE_NEEDED == 'true' && steps.locate_worker.outputs.worker_found == 'true'
-        shell: bash
-        run: |
-          set -e
+          echo -e "\033[34m[复制生成的 _worker.js 到主仓库]\033[0m"
+          cd ..
           rm -f _worker.js version.txt
-          SRC="${{ steps.locate_worker.outputs.worker_path }}"
-          if [[ "$SRC" = /* ]]; then
-            cp -f "$SRC" ./_worker.js
-          else
-            cp -f "upstream/$SRC" ./_worker.js
-          fi
-          echo "${TAG_NAME}" > version.txt
-          echo "已拷贝 _worker.js 并写入 version.txt"
+          cp official-repo/dist/_worker.js ./
+          echo "$TAG_NAME" > version.txt
+          rm -rf official-repo
 
       - name: 提交更改
-        if: env.UPDATE_NEEDED == 'true' && steps.locate_worker.outputs.worker_found == 'true'
+        if: env.UPDATE_NEEDED == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 自动构建并同步最新 Worker 版本：${{ env.TAG_NAME }}（随机种子构建）"
+          commit_message: "🔄 自动同步最新 Worker 版本：${{ env.TAG_NAME }}"
           commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
           push_options: --force
