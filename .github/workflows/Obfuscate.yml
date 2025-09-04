@@ -205,7 +205,7 @@ jobs:
           fi
 
           # 进行二次混淆：这里在 upstream 工作目录下执行，确保 require 能找到 node_modules
-          node - <<'NODE'
+node - <<'NODE'
 const fs = require('fs');
 const Ob = require('javascript-obfuscator');
 const path = process.env.WORKER_PATH;
